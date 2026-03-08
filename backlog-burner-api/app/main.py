@@ -1,6 +1,13 @@
 import os
 import json
+from pathlib import Path
 from datetime import datetime
+
+from dotenv import load_dotenv
+
+# Load .env from the app directory and parent directory
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
+load_dotenv()  # also try cwd
 
 import httpx
 import aiosqlite
@@ -358,6 +365,28 @@ async def list_sessions():
     rows = await cursor.fetchall()
     await db.close()
     return {"sessions": [dict(r) for r in rows]}
+
+
+@app.delete("/api/sessions")
+async def clear_sessions():
+    """Clear all sessions (useful after fixing config issues)."""
+    db = await get_db()
+    cursor = await db.execute("SELECT COUNT(*) as count FROM sessions")
+    count = (await cursor.fetchone())["count"]
+    await db.execute("DELETE FROM sessions")
+    await db.commit()
+    await db.close()
+    return {"cleared": count}
+
+
+@app.get("/api/config")
+async def get_config():
+    """Check backend configuration status (no secrets exposed)."""
+    return {
+        "devin_api_configured": bool(DEVIN_API_TOKEN),
+        "github_token_configured": bool(GITHUB_TOKEN),
+        "default_repo": DEFAULT_REPO,
+    }
 
 
 @app.post("/api/sessions/refresh")
