@@ -1,4 +1,5 @@
 import os
+import re
 import json
 from pathlib import Path
 from datetime import datetime
@@ -156,7 +157,7 @@ async def list_issues(
         SELECT i.*, t.issue_type, t.complexity, t.devin_fit, t.candidate_score,
                t.recommendation, t.reasoning,
                s.session_id, s.status as session_status, s.latest_state,
-               s.session_url, s.pr_url
+               s.session_url, s.pr_url, s.pr_status
         FROM issues i
         LEFT JOIN triage t ON i.issue_number = t.issue_number
         LEFT JOIN sessions s ON i.issue_number = s.issue_number
@@ -215,7 +216,7 @@ async def get_issue(issue_number: int):
         """SELECT i.*, t.issue_type, t.complexity, t.devin_fit, t.candidate_score,
                   t.recommendation, t.reasoning, t.generated_prompt, t.acceptance_criteria,
                   s.session_id, s.status as session_status, s.latest_state,
-                  s.session_url, s.pr_url, s.prompt as session_prompt
+                  s.session_url, s.pr_url, s.pr_status, s.prompt as session_prompt
            FROM issues i
            LEFT JOIN triage t ON i.issue_number = t.issue_number
            LEFT JOIN sessions s ON i.issue_number = s.issue_number
@@ -391,13 +392,14 @@ async def get_config():
 
 @app.post("/api/sessions/refresh")
 async def refresh_sessions():
-    """Refresh session statuses from Devin API."""
+    """Refresh session statuses from Devin API, including PR merge status."""
     if not DEVIN_API_TOKEN:
         return {"refreshed": 0, "message": "No Devin API token configured"}
 
     db = await get_db()
+    # Refresh ALL real sessions (not just non-done) so we catch PR merges after completion
     cursor = await db.execute(
-        "SELECT * FROM sessions WHERE status != 'done' AND session_id NOT LIKE 'mock-%' AND session_id NOT LIKE 'pending-%'"
+        "SELECT * FROM sessions WHERE session_id NOT LIKE 'mock-%' AND session_id NOT LIKE 'pending-%'"
     )
     rows = await cursor.fetchall()
     refreshed = 0
@@ -405,6 +407,9 @@ async def refresh_sessions():
     api_headers = {
         "Authorization": f"Bearer {DEVIN_API_TOKEN}",
     }
+    github_headers = {"Accept": "application/vnd.github+json"}
+    if GITHUB_TOKEN:
+        github_headers["Authorization"] = f"Bearer {GITHUB_TOKEN}"
 
     async with httpx.AsyncClient() as client:
         for row in rows:
@@ -417,13 +422,26 @@ async def refresh_sessions():
                 )
                 if resp.status_code == 200:
                     data = resp.json()
-                    status = data.get("status", session["status"])
-                    pr_url = ""
+                    status_enum = data.get("status_enum", data.get("status", session["status"]))
+                    pr_url = session.get("pr_url", "") or ""
+                    pr_status = session.get("pr_status", "") or ""
 
+                    # Extract PR URL from Devin API response
                     pull_request = data.get("pull_request")
                     if pull_request:
-                        pr_url = pull_request.get("url", pull_request.get("html_url", ""))
+                        pr_url = pull_request.get("url", pull_request.get("html_url", pr_url))
 
+                    # Fallback: scan session messages for GitHub PR URLs
+                    if not pr_url:
+                        messages = data.get("messages", [])
+                        for msg in reversed(messages):
+                            text = msg.get("message", "")
+                            match = re.search(r'https://github\.com/[\w.-]+/[\w.-]+/pull/\d+', text)
+                            if match:
+                                pr_url = match.group(0)
+                                break
+
+                    # Map Devin status to our display state
                     status_map = {
                         "running": "coding",
                         "blocked": "needs_input",
@@ -431,13 +449,40 @@ async def refresh_sessions():
                         "stopped": "done",
                         "error": "needs_input",
                     }
-                    latest_state = status_map.get(status, status)
+                    latest_state = status_map.get(status_enum, status_enum)
+
+                    # If we have a PR URL, check its merge status via GitHub API
+                    if pr_url and ("github.com" in pr_url):
+                        try:
+                            # Parse owner/repo/pull_number from URL
+                            # e.g. https://github.com/owner/repo/pull/123
+                            parts = pr_url.rstrip("/").split("/")
+                            if "pull" in parts:
+                                pull_idx = parts.index("pull")
+                                owner = parts[pull_idx - 2]
+                                repo_name = parts[pull_idx - 1]
+                                pull_number = parts[pull_idx + 1]
+                                gh_resp = await client.get(
+                                    f"https://api.github.com/repos/{owner}/{repo_name}/pulls/{pull_number}",
+                                    headers=github_headers,
+                                    timeout=10.0,
+                                )
+                                if gh_resp.status_code == 200:
+                                    pr_data = gh_resp.json()
+                                    if pr_data.get("merged"):
+                                        pr_status = "merged"
+                                    elif pr_data.get("state") == "closed":
+                                        pr_status = "closed"
+                                    else:
+                                        pr_status = "open"
+                        except Exception as e:
+                            print(f"Error checking PR status for {pr_url}: {e}")
 
                     await db.execute(
                         """UPDATE sessions
-                           SET status = ?, latest_state = ?, pr_url = ?, updated_at = datetime('now')
+                           SET status = ?, latest_state = ?, pr_url = ?, pr_status = ?, updated_at = datetime('now')
                            WHERE session_id = ?""",
-                        (status, latest_state, pr_url or session.get("pr_url", ""), session["session_id"]),
+                        (status_enum, latest_state, pr_url, pr_status, session["session_id"]),
                     )
                     refreshed += 1
             except Exception as e:

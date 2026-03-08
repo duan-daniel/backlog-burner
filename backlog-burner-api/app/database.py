@@ -50,6 +50,7 @@ async def init_db():
             session_id TEXT,
             session_url TEXT DEFAULT '',
             pr_url TEXT DEFAULT '',
+            pr_status TEXT DEFAULT '',
             status TEXT DEFAULT 'pending',
             latest_state TEXT DEFAULT 'pending',
             playbook_id TEXT DEFAULT '',
@@ -59,5 +60,11 @@ async def init_db():
             FOREIGN KEY (issue_number) REFERENCES issues(issue_number)
         );
     """)
+    # Migrate: add pr_status column if missing (for existing DBs)
+    try:
+        await db.execute("SELECT pr_status FROM sessions LIMIT 1")
+    except Exception:
+        await db.execute("ALTER TABLE sessions ADD COLUMN pr_status TEXT DEFAULT ''")
+
     await db.commit()
     await db.close()

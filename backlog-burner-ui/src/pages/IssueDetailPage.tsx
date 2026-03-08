@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import {
   ArrowLeft,
@@ -6,12 +6,14 @@ import {
   Rocket,
   RefreshCw,
   GitPullRequest,
+  GitMerge,
+  XCircle,
   Clock,
   Tag,
   FileText,
   Zap,
 } from "lucide-react";
-import { getIssue, delegateToDevin, type Issue } from "../lib/api";
+import { getIssue, delegateToDevin, refreshSessions, type Issue } from "../lib/api";
 
 function Badge({ children, className }: { children: React.ReactNode; className: string }) {
   return (
@@ -27,6 +29,8 @@ export default function IssueDetailPage() {
   const [issue, setIssue] = useState<Issue | null>(null);
   const [loading, setLoading] = useState(true);
   const [delegating, setDelegating] = useState(false);
+  const [refreshingSession, setRefreshingSession] = useState(false);
+  const didAutoRefresh = useRef(false);
 
   const load = async () => {
     if (!issueNumber) return;
@@ -44,6 +48,34 @@ export default function IssueDetailPage() {
   useEffect(() => {
     load();
   }, [issueNumber]);
+
+  // Auto-refresh session status once on page load if issue has a session
+  useEffect(() => {
+    if (!loading && issue?.session_id && !didAutoRefresh.current) {
+      didAutoRefresh.current = true;
+      (async () => {
+        try {
+          await refreshSessions();
+          const data = await getIssue(Number(issueNumber));
+          setIssue(data);
+        } catch (e) {
+          console.error("Auto-refresh failed", e);
+        }
+      })();
+    }
+  }, [loading, issue?.session_id]);
+
+  const handleRefresh = async () => {
+    setRefreshingSession(true);
+    try {
+      await refreshSessions();
+      await load();
+    } catch (e) {
+      console.error("Refresh failed", e);
+    } finally {
+      setRefreshingSession(false);
+    }
+  };
 
   const handleDelegate = async () => {
     if (!issue) return;
@@ -281,10 +313,20 @@ export default function IssueDetailPage() {
           {/* Session status */}
           {issue.session_id && (
             <div className="rounded-xl border border-purple-500/20 bg-purple-500/5 p-6 space-y-4">
-              <h2 className="text-sm font-semibold text-purple-400 uppercase tracking-wider flex items-center gap-2">
-                <Rocket className="h-4 w-4" />
-                Devin Session
-              </h2>
+              <div className="flex items-center justify-between">
+                <h2 className="text-sm font-semibold text-purple-400 uppercase tracking-wider flex items-center gap-2">
+                  <Rocket className="h-4 w-4" />
+                  Devin Session
+                </h2>
+                <button
+                  onClick={handleRefresh}
+                  disabled={refreshingSession}
+                  title="Refresh session status"
+                  className="text-gray-400 hover:text-purple-400 transition-colors disabled:opacity-50"
+                >
+                  <RefreshCw className={`h-3.5 w-3.5 ${refreshingSession ? "animate-spin" : ""}`} />
+                </button>
+              </div>
               <div className="space-y-3 text-sm">
                 <div className="flex items-center justify-between">
                   <span className="text-gray-400">Status</span>
@@ -307,15 +349,30 @@ export default function IssueDetailPage() {
                 )}
                 {issue.pr_url && (
                   <div className="flex items-center justify-between">
-                    <span className="text-gray-400">PR</span>
+                    <span className="text-gray-400">Pull Request</span>
                     <a
                       href={issue.pr_url}
                       target="_blank"
                       rel="noreferrer"
-                      className="text-green-400 hover:underline flex items-center gap-1"
+                      className="hover:underline flex items-center gap-1.5"
                     >
-                      <GitPullRequest className="h-3 w-3" />
-                      View PR <ExternalLink className="h-3 w-3" />
+                      {issue.pr_status === "merged" ? (
+                        <>
+                          <GitMerge className="h-3.5 w-3.5 text-purple-400" />
+                          <span className="text-purple-400">Merged</span>
+                        </>
+                      ) : issue.pr_status === "closed" ? (
+                        <>
+                          <XCircle className="h-3.5 w-3.5 text-red-400" />
+                          <span className="text-red-400">Closed</span>
+                        </>
+                      ) : (
+                        <>
+                          <GitPullRequest className="h-3.5 w-3.5 text-green-400" />
+                          <span className="text-green-400">Open</span>
+                        </>
+                      )}
+                      <ExternalLink className="h-3 w-3 text-gray-500" />
                     </a>
                   </div>
                 )}

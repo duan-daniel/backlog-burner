@@ -38,6 +38,7 @@ export interface Issue {
   latest_state: string | null;
   session_url: string | null;
   pr_url: string | null;
+  pr_status: string | null;
   session_prompt?: string | null;
   age_days: number | null;
 }

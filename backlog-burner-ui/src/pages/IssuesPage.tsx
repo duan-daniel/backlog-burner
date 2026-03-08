@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import {
   Download,
@@ -7,8 +7,11 @@ import {
   Rocket,
   ChevronRight,
   Filter,
+  GitPullRequest,
+  GitMerge,
+  XCircle,
 } from "lucide-react";
-import { getIssues, ingestIssues, delegateToDevin, DEFAULT_REPO, type Issue } from "../lib/api";
+import { getIssues, ingestIssues, delegateToDevin, refreshSessions, DEFAULT_REPO, type Issue } from "../lib/api";
 
 function ScoreBadge({ score }: { score: number | null }) {
   if (score === null) return <span className="text-gray-600">—</span>;
@@ -72,6 +75,8 @@ export default function IssuesPage() {
   const [loading, setLoading] = useState(true);
   const [ingesting, setIngesting] = useState(false);
   const [delegatingId, setDelegatingId] = useState<number | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
+  const didAutoRefresh = useRef(false);
   const [repo, setRepo] = useState(DEFAULT_REPO);
   const [searchParams, setSearchParams] = useSearchParams();
   const navigate = useNavigate();
@@ -123,6 +128,37 @@ export default function IssuesPage() {
     }
   };
 
+  const handleRefreshSessions = async () => {
+    setRefreshing(true);
+    try {
+      await refreshSessions();
+      await load();
+    } catch (e) {
+      console.error("Refresh sessions failed", e);
+    } finally {
+      setRefreshing(false);
+    }
+  };
+
+  // Auto-refresh sessions once on page load if any issues have sessions
+  useEffect(() => {
+    if (!loading && issues.length > 0 && !didAutoRefresh.current) {
+      const hasSessions = issues.some((i) => i.session_id);
+      if (hasSessions) {
+        didAutoRefresh.current = true;
+        (async () => {
+          try {
+            await refreshSessions();
+            const resp = await getIssues(filterParam !== "all" ? { recommendation: filterParam } : undefined);
+            setIssues(resp.issues);
+          } catch (e) {
+            console.error("Auto-refresh failed", e);
+          }
+        })();
+      }
+    }
+  }, [loading, issues.length]);
+
   const filters = [
     { label: "All", value: "all" },
     { label: "Recommended", value: "recommended" },
@@ -155,10 +191,12 @@ export default function IssuesPage() {
             {ingesting ? "Syncing..." : "Sync Issues"}
           </button>
           <button
-            onClick={load}
-            className="inline-flex items-center gap-2 rounded-lg border border-gray-700 px-3 py-2 text-sm text-gray-300 hover:bg-gray-800"
+            onClick={handleRefreshSessions}
+            disabled={refreshing}
+            title="Refresh session statuses"
+            className="inline-flex items-center gap-2 rounded-lg border border-gray-700 px-3 py-2 text-sm text-gray-300 hover:bg-gray-800 disabled:opacity-50"
           >
-            <RefreshCw className="h-4 w-4" />
+            <RefreshCw className={`h-4 w-4 ${refreshing ? "animate-spin" : ""}`} />
           </button>
         </div>
       </div>
@@ -263,7 +301,27 @@ export default function IssuesPage() {
                   </td>
                   <td className="px-4 py-3 text-center">
                     {issue.session_id ? (
-                      <StatusBadge state={issue.latest_state} />
+                      <div className="flex items-center justify-center gap-1.5">
+                        <StatusBadge state={issue.latest_state} />
+                        {issue.pr_url && (
+                          <a
+                            href={issue.pr_url}
+                            target="_blank"
+                            rel="noreferrer"
+                            onClick={(e) => e.stopPropagation()}
+                            title={issue.pr_status ? `PR ${issue.pr_status}` : "View PR"}
+                            className="flex items-center"
+                          >
+                            {issue.pr_status === "merged" ? (
+                              <GitMerge className="h-3.5 w-3.5 text-purple-400" />
+                            ) : issue.pr_status === "closed" ? (
+                              <XCircle className="h-3.5 w-3.5 text-red-400" />
+                            ) : (
+                              <GitPullRequest className="h-3.5 w-3.5 text-green-400" />
+                            )}
+                          </a>
+                        )}
+                      </div>
                     ) : (
                       <span className="text-xs text-gray-600">not delegated</span>
                     )}
